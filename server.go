@@ -142,11 +142,13 @@ func WithServerWorkingDirectory(workDir string) ServerOption {
 	}
 }
 
-<<<<<<< HEAD
 func WithBaseDirectory(workDir string) ServerOption {
 	return func(s *Server) error {
 		s.baseDir = cleanPath(workDir)
-=======
+		return nil
+	}
+}
+
 // WithMaxTxPacket sets the maximum size of the payload returned to the client,
 // measured in bytes. The default value is 32768 bytes, and this option
 // can only be used to increase it. Setting this option to a larger value
@@ -161,7 +163,6 @@ func WithMaxTxPacket(size uint32) ServerOption {
 
 		s.maxTxPacket = size
 
->>>>>>> c8fe1f69640c3d92b05e1d7f0072addd6ece3ed2
 		return nil
 	}
 }
