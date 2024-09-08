@@ -780,8 +780,13 @@ func TestRequestReaddir(t *testing.T) {
 		}
 	}
 	_, err := p.cli.ReadDir("/foo_01")
-	assert.Equal(t, &StatusError{Code: sshFxFailure,
-		msg: " /foo_01: not a directory"}, err)
+	if runtime.GOOS == "zos" {
+		assert.Equal(t, &StatusError{Code: sshFxFailure,
+			msg: " /foo_01: EDC5135I Not a directory."}, err)
+	} else {
+		assert.Equal(t, &StatusError{Code: sshFxFailure,
+			msg: " /foo_01: not a directory"}, err)
+	}
 	_, err = p.cli.ReadDir("/does_not_exist")
 	assert.Equal(t, os.ErrNotExist, err)
 	di, err := p.cli.ReadDir("/")
@@ -791,6 +796,37 @@ func TestRequestReaddir(t *testing.T) {
 	assert.Equal(t, []string{"foo_18", "foo_81"}, names)
 	assert.Len(t, p.svr.openRequests, 0)
 	checkRequestServerAllocator(t, p)
+}
+
+type testListerAtCloser struct {
+	isClosed bool
+}
+
+func (l *testListerAtCloser) ListAt([]os.FileInfo, int64) (int, error) {
+	return 0, io.EOF
+}
+
+func (l *testListerAtCloser) Close() error {
+	l.isClosed = true
+	return nil
+}
+
+func TestRequestServerListerAtCloser(t *testing.T) {
+	p := clientRequestServerPair(t)
+	defer p.Close()
+
+	handle, err := p.cli.opendir(context.Background(), "/")
+	require.NoError(t, err)
+	require.Len(t, p.svr.openRequests, 1)
+	req, ok := p.svr.getRequest(handle)
+	require.True(t, ok)
+	listerAt := &testListerAtCloser{}
+	req.setListerAt(listerAt)
+	assert.NotNil(t, req.state.getListerAt())
+	err = p.cli.close(handle)
+	assert.NoError(t, err)
+	require.Len(t, p.svr.openRequests, 0)
+	assert.True(t, listerAt.isClosed)
 }
 
 func TestRequestStatVFS(t *testing.T) {

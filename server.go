@@ -35,6 +35,7 @@ type Server struct {
 	handleCount   int
 	workDir       string
 	baseDir       string
+	maxTxPacket   uint32
 }
 
 func (svr *Server) nextHandle(f *os.File) string {
@@ -87,6 +88,7 @@ func NewServer(rwc io.ReadWriteCloser, options ...ServerOption) (*Server, error)
 		debugStream: ioutil.Discard,
 		pktMgr:      newPktMgr(svrConn),
 		openFiles:   make(map[string]*os.File),
+		maxTxPacket: defaultMaxTxPacket,
 	}
 
 	for _, o := range options {
@@ -140,9 +142,26 @@ func WithServerWorkingDirectory(workDir string) ServerOption {
 	}
 }
 
+<<<<<<< HEAD
 func WithBaseDirectory(workDir string) ServerOption {
 	return func(s *Server) error {
 		s.baseDir = cleanPath(workDir)
+=======
+// WithMaxTxPacket sets the maximum size of the payload returned to the client,
+// measured in bytes. The default value is 32768 bytes, and this option
+// can only be used to increase it. Setting this option to a larger value
+// should be safe, because the client decides the size of the requested payload.
+//
+// The default maximum packet size is 32768 bytes.
+func WithMaxTxPacket(size uint32) ServerOption {
+	return func(s *Server) error {
+		if size < defaultMaxTxPacket {
+			return errors.New("size must be greater than or equal to 32768")
+		}
+
+		s.maxTxPacket = size
+
+>>>>>>> c8fe1f69640c3d92b05e1d7f0072addd6ece3ed2
 		return nil
 	}
 }
@@ -295,7 +314,7 @@ func handlePacket(s *Server, p orderedRequest) error {
 		f, ok := s.getHandle(p.Handle)
 		if ok {
 			err = nil
-			data := p.getDataSlice(s.pktMgr.alloc, orderID)
+			data := p.getDataSlice(s.pktMgr.alloc, orderID, s.maxTxPacket)
 			n, _err := f.ReadAt(data, int64(p.Offset))
 			if _err != nil && (_err != io.EOF || n == 0) {
 				err = _err
@@ -470,7 +489,18 @@ func (p *sshFxpOpenPacket) respond(svr *Server) responsePacket {
 		osFlags |= os.O_EXCL
 	}
 
-	f, err := os.OpenFile(svr.toLocalPath(p.Path), osFlags, 0o644)
+	mode := os.FileMode(0o644)
+	// Like OpenSSH, we only handle permissions here, and only when the file is being created.
+	// Otherwise, the permissions are ignored.
+	if p.Flags&sshFileXferAttrPermissions != 0 {
+		fs, err := p.unmarshalFileStat(p.Flags)
+		if err != nil {
+			return statusFromError(p.ID, err)
+		}
+		mode = fs.FileMode() & os.ModePerm
+	}
+
+	f, err := os.OpenFile(svr.toLocalPath(p.Path), osFlags, mode)
 	if err != nil {
 		return statusFromError(p.ID, err)
 	}
@@ -504,44 +534,23 @@ func (p *sshFxpReaddirPacket) respond(svr *Server) responsePacket {
 }
 
 func (p *sshFxpSetstatPacket) respond(svr *Server) responsePacket {
-	// additional unmarshalling is required for each possibility here
-	b := p.Attrs.([]byte)
-	var err error
+	path := svr.toLocalPath(p.Path)
 
-	p.Path = svr.toLocalPath(p.Path)
+	debug("setstat name %q", path)
 
-	debug("setstat name \"%s\"", p.Path)
-	if (p.Flags & sshFileXferAttrSize) != 0 {
-		var size uint64
-		if size, b, err = unmarshalUint64Safe(b); err == nil {
-			err = os.Truncate(p.Path, int64(size))
-		}
+	fs, err := p.unmarshalFileStat(p.Flags)
+
+	if err == nil && (p.Flags&sshFileXferAttrSize) != 0 {
+		err = os.Truncate(path, int64(fs.Size))
 	}
-	if (p.Flags & sshFileXferAttrPermissions) != 0 {
-		var mode uint32
-		if mode, b, err = unmarshalUint32Safe(b); err == nil {
-			err = os.Chmod(p.Path, os.FileMode(mode))
-		}
+	if err == nil && (p.Flags&sshFileXferAttrPermissions) != 0 {
+		err = os.Chmod(path, fs.FileMode())
 	}
-	if (p.Flags & sshFileXferAttrACmodTime) != 0 {
-		var atime uint32
-		var mtime uint32
-		if atime, b, err = unmarshalUint32Safe(b); err != nil {
-		} else if mtime, b, err = unmarshalUint32Safe(b); err != nil {
-		} else {
-			atimeT := time.Unix(int64(atime), 0)
-			mtimeT := time.Unix(int64(mtime), 0)
-			err = os.Chtimes(p.Path, atimeT, mtimeT)
-		}
+	if err == nil && (p.Flags&sshFileXferAttrUIDGID) != 0 {
+		err = os.Chown(path, int(fs.UID), int(fs.GID))
 	}
-	if (p.Flags & sshFileXferAttrUIDGID) != 0 {
-		var uid uint32
-		var gid uint32
-		if uid, b, err = unmarshalUint32Safe(b); err != nil {
-		} else if gid, _, err = unmarshalUint32Safe(b); err != nil {
-		} else {
-			err = os.Chown(p.Path, int(uid), int(gid))
-		}
+	if err == nil && (p.Flags&sshFileXferAttrACmodTime) != 0 {
+		err = os.Chtimes(path, fs.AccessTime(), fs.ModTime())
 	}
 
 	return statusFromError(p.ID, err)
@@ -553,41 +562,32 @@ func (p *sshFxpFsetstatPacket) respond(svr *Server) responsePacket {
 		return statusFromError(p.ID, EBADF)
 	}
 
-	// additional unmarshalling is required for each possibility here
-	b := p.Attrs.([]byte)
-	var err error
+	path := f.Name()
 
-	debug("fsetstat name \"%s\"", f.Name())
-	if (p.Flags & sshFileXferAttrSize) != 0 {
-		var size uint64
-		if size, b, err = unmarshalUint64Safe(b); err == nil {
-			err = f.Truncate(int64(size))
-		}
+	debug("fsetstat name %q", path)
+
+	fs, err := p.unmarshalFileStat(p.Flags)
+
+	if err == nil && (p.Flags&sshFileXferAttrSize) != 0 {
+		err = f.Truncate(int64(fs.Size))
 	}
-	if (p.Flags & sshFileXferAttrPermissions) != 0 {
-		var mode uint32
-		if mode, b, err = unmarshalUint32Safe(b); err == nil {
-			err = f.Chmod(os.FileMode(mode))
-		}
+	if err == nil && (p.Flags&sshFileXferAttrPermissions) != 0 {
+		err = f.Chmod(fs.FileMode())
 	}
-	if (p.Flags & sshFileXferAttrACmodTime) != 0 {
-		var atime uint32
-		var mtime uint32
-		if atime, b, err = unmarshalUint32Safe(b); err != nil {
-		} else if mtime, b, err = unmarshalUint32Safe(b); err != nil {
-		} else {
-			atimeT := time.Unix(int64(atime), 0)
-			mtimeT := time.Unix(int64(mtime), 0)
-			err = os.Chtimes(f.Name(), atimeT, mtimeT)
-		}
+	if err == nil && (p.Flags&sshFileXferAttrUIDGID) != 0 {
+		err = f.Chown(int(fs.UID), int(fs.GID))
 	}
-	if (p.Flags & sshFileXferAttrUIDGID) != 0 {
-		var uid uint32
-		var gid uint32
-		if uid, b, err = unmarshalUint32Safe(b); err != nil {
-		} else if gid, _, err = unmarshalUint32Safe(b); err != nil {
-		} else {
-			err = f.Chown(int(uid), int(gid))
+	if err == nil && (p.Flags&sshFileXferAttrACmodTime) != 0 {
+		type chtimer interface {
+			Chtimes(atime, mtime time.Time) error
+		}
+
+		switch f := interface{}(f).(type) {
+		case chtimer:
+			// future-compatible, for when/if *os.File supports Chtimes.
+			err = f.Chtimes(fs.AccessTime(), fs.ModTime())
+		default:
+			err = os.Chtimes(path, fs.AccessTime(), fs.ModTime())
 		}
 	}
 
