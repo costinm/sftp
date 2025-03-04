@@ -34,7 +34,6 @@ type Server struct {
 	openFilesLock sync.RWMutex
 	handleCount   int
 	workDir       string
-	baseDir       string
 	maxTxPacket   uint32
 }
 
@@ -138,13 +137,6 @@ func WithAllocator() ServerOption {
 func WithServerWorkingDirectory(workDir string) ServerOption {
 	return func(s *Server) error {
 		s.workDir = cleanPath(workDir)
-		return nil
-	}
-}
-
-func WithBaseDirectory(workDir string) ServerOption {
-	return func(s *Server) error {
-		s.baseDir = cleanPath(workDir)
 		return nil
 	}
 }
