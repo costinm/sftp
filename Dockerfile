@@ -13,5 +13,5 @@ RUN strip /tmp/sftp-server && ls -l /tmp/sftp-server
 
 FROM scratch
 
-# ~400k
+# ~400k - compared to 4.3M (2.9 stripped)
 COPY --from=build /tmp/sftp-server /bin/sftp-server

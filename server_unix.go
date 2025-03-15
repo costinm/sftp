@@ -26,9 +26,9 @@ func (s *Server) toLocalPath(p string) string {
 	return p
 }
 
-// toRealpath is used in the 'realpath' command - will add the workdir and
+// toRealpathLocal is used in the 'realpath' command - will add the workdir and
 // clean the path, but not add the 'base'
-func (s *Server) toRealpath(p string) string {
+func (s *Server) toRealpathLocal(p string) string {
 	p = filepath.Clean(p)
 	if s.workDir != "" && !path.IsAbs(p) {
 		p = path.Join(s.workDir, p)

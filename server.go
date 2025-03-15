@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -21,6 +22,18 @@ const (
 	SftpServerWorkerCount = 8
 )
 
+type file interface {
+	Stat() (os.FileInfo, error)
+	ReadAt(b []byte, off int64) (int, error)
+	WriteAt(b []byte, off int64) (int, error)
+	Readdir(int) ([]os.FileInfo, error)
+	Name() string
+	Truncate(int64) error
+	Chmod(mode fs.FileMode) error
+	// Missing in tinygo os.File: Chown(uid, gid int) error
+	Close() error
+}
+
 // Server is an SSH File Transfer Protocol (sftp) server.
 // This is intended to provide the sftp subsystem to an ssh server daemon.
 // This implementation currently supports most of sftp server protocol version 3,
@@ -30,7 +43,7 @@ type Server struct {
 	debugStream   io.Writer
 	readOnly      bool
 	pktMgr        *packetManager
-	openFiles     map[string]*os.File
+	openFiles     map[string]file
 	openFilesLock sync.RWMutex
 	handleCount   int
 	workDir       string
@@ -40,7 +53,7 @@ type Server struct {
 	baseDir string
 }
 
-func (svr *Server) nextHandle(f *os.File) string {
+func (svr *Server) nextHandle(f file) string {
 	svr.openFilesLock.Lock()
 	defer svr.openFilesLock.Unlock()
 	svr.handleCount++
@@ -60,7 +73,7 @@ func (svr *Server) closeHandle(handle string) error {
 	return EBADF
 }
 
-func (svr *Server) getHandle(handle string) (*os.File, bool) {
+func (svr *Server) getHandle(handle string) (file, bool) {
 	svr.openFilesLock.RLock()
 	defer svr.openFilesLock.RUnlock()
 	f, ok := svr.openFiles[handle]
@@ -89,7 +102,7 @@ func NewServer(rwc io.ReadWriteCloser, options ...ServerOption) (*Server, error)
 		serverConn:  svrConn,
 		debugStream: ioutil.Discard,
 		pktMgr:      newPktMgr(svrConn),
-		openFiles:   make(map[string]*os.File),
+		openFiles:   make(map[string]file),
 		maxTxPacket: defaultMaxTxPacket,
 	}
 	for _, o := range options {
@@ -288,7 +301,7 @@ func handlePacket(s *Server, p orderedRequest) error {
 			rpkt = statusFromError(p.ID, err)
 		}
 	case *sshFxpRealpathPacket:
-		f, err := filepath.Abs(s.toRealpath(p.Path))
+		f, err := filepath.Abs(s.toRealpathLocal(p.Path))
 		f = cleanPath(f)
 		rpkt = &sshFxpNamePacket{
 			ID: p.ID,
@@ -586,7 +599,7 @@ func (p *sshFxpFsetstatPacket) respond(svr *Server) responsePacket {
 		err = f.Chmod(fs.FileMode())
 	}
 	if err == nil && (p.Flags&sshFileXferAttrUIDGID) != 0 {
-		err = os.Chown(f.Name(), int(fs.UID), int(fs.GID))
+		os.Chown(f.Name(), int(fs.UID), int(fs.GID))
 	}
 	if err == nil && (p.Flags&sshFileXferAttrACmodTime) != 0 {
 		type chtimer interface {
