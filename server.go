@@ -34,7 +34,10 @@ type Server struct {
 	openFilesLock sync.RWMutex
 	handleCount   int
 	workDir       string
+	winRoot       bool
 	maxTxPacket   uint32
+
+	baseDir string
 }
 
 func (svr *Server) nextHandle(f *os.File) string {
@@ -89,7 +92,6 @@ func NewServer(rwc io.ReadWriteCloser, options ...ServerOption) (*Server, error)
 		openFiles:   make(map[string]*os.File),
 		maxTxPacket: defaultMaxTxPacket,
 	}
-
 	for _, o := range options {
 		if err := o(s); err != nil {
 			return nil, err
@@ -110,10 +112,25 @@ func WithDebug(w io.Writer) ServerOption {
 	}
 }
 
+func WithBasedir(baseDir string) ServerOption {
+	return func(s *Server) error {
+		s.baseDir = baseDir
+		return nil
+	}
+}
+
 // ReadOnly configures a Server to serve files in read-only mode.
 func ReadOnly() ServerOption {
 	return func(s *Server) error {
 		s.readOnly = true
+		return nil
+	}
+}
+
+// WindowsRootEnumeratesDrives configures a Server to serve a virtual '/' for windows that lists all drives
+func WindowsRootEnumeratesDrives() ServerOption {
+	return func(s *Server) error {
+		s.winRoot = true
 		return nil
 	}
 }
@@ -215,7 +232,7 @@ func handlePacket(s *Server, p orderedRequest) error {
 		}
 	case *sshFxpLstatPacket:
 		// stat the requested file
-		info, err := os.Lstat(s.toLocalPath(p.Path))
+		info, err := s.lstat(s.toLocalPath(p.Path))
 		rpkt = &sshFxpStatResponse{
 			ID:   p.ID,
 			info: info,
@@ -271,7 +288,7 @@ func handlePacket(s *Server, p orderedRequest) error {
 			rpkt = statusFromError(p.ID, err)
 		}
 	case *sshFxpRealpathPacket:
-		f, err := filepath.Abs(s.toLocalPath(p.Path))
+		f, err := filepath.Abs(s.toRealpath(p.Path))
 		f = cleanPath(f)
 		rpkt = &sshFxpNamePacket{
 			ID: p.ID,
@@ -289,7 +306,7 @@ func handlePacket(s *Server, p orderedRequest) error {
 	case *sshFxpOpendirPacket:
 		lp := s.toLocalPath(p.Path)
 
-		if stat, err := os.Stat(lp); err != nil {
+		if stat, err := s.stat(lp); err != nil {
 			rpkt = statusFromError(p.ID, err)
 		} else if !stat.IsDir() {
 			rpkt = statusFromError(p.ID, &os.PathError{
@@ -493,7 +510,7 @@ func (p *sshFxpOpenPacket) respond(svr *Server) responsePacket {
 		mode = fs.FileMode() & os.ModePerm
 	}
 
-	f, err := os.OpenFile(svr.toLocalPath(p.Path), osFlags, mode)
+	f, err := svr.openfile(svr.toLocalPath(p.Path), osFlags, mode)
 	if err != nil {
 		return statusFromError(p.ID, err)
 	}
@@ -527,6 +544,7 @@ func (p *sshFxpReaddirPacket) respond(svr *Server) responsePacket {
 }
 
 func (p *sshFxpSetstatPacket) respond(svr *Server) responsePacket {
+	// no os.Root support for those
 	path := svr.toLocalPath(p.Path)
 
 	debug("setstat name %q", path)
@@ -568,7 +586,7 @@ func (p *sshFxpFsetstatPacket) respond(svr *Server) responsePacket {
 		err = f.Chmod(fs.FileMode())
 	}
 	if err == nil && (p.Flags&sshFileXferAttrUIDGID) != 0 {
-		err = f.Chown(int(fs.UID), int(fs.GID))
+		err = os.Chown(f.Name(), int(fs.UID), int(fs.GID))
 	}
 	if err == nil && (p.Flags&sshFileXferAttrACmodTime) != 0 {
 		type chtimer interface {
