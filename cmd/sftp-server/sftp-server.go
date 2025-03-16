@@ -23,6 +23,9 @@ func main() {
 	ro := flag.Bool("R", false, "read-only")
 	startDir := flag.String("d", "", "start dir")
 	debug := flag.Bool("e", false, "print logs on stderr")
+
+	flag.Parse()
+
 	baseDir := os.Getenv("SFTP_ROOT")
 	opts := []sftp.ServerOption{}
 	if *debug {
